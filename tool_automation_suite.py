@@ -8,13 +8,6 @@
 # --- VERSION 5.2 (Performance Logging Integration) ---
 # - Tích hợp hệ thống ghi log hiệu suất tập trung.
 # - Gọi performance_logger.setup_logger() ngay khi khởi động.
-# --- VERSION 5.3 (Explorer Integration Fix) ---
-# - Thêm cờ 'is_run_from_suite=True' khi khởi tạo ExplorerTab để kích hoạt
-#   tính năng "Send to Debugger".
-# --- VERSION 5.4 (Reference Expansion) ---
-# - Bổ sung bảng tham chiếu cho "Actions" vào tab "Selector Reference".
-# - Mở rộng và chi tiết hóa danh sách API cho UIController và AppManager.
-# - Thêm nhiều ví dụ code mới cho các API được bổ sung.
 
 import tkinter as tk
 from tkinter import ttk, font, messagebox, scrolledtext
@@ -37,8 +30,7 @@ try:
     from core_logic import (
         PARAMETER_DEFINITIONS,
         OPERATOR_DEFINITIONS,
-        SELECTOR_DEFINITIONS,
-        ACTION_DEFINITIONS
+        SELECTOR_DEFINITIONS
     )
 except ImportError as e:
     print(f"CRITICAL ERROR: Could not import a required tool module: {e}")
@@ -184,30 +176,21 @@ class ReferenceTab(ttk.Frame):
     # --- Sub-Tab 1: Selector Reference ---
     def create_selector_ref_tab(self):
         tab_frame = ttk.Frame(self.notebook, padding=5)
-        self.notebook.add(tab_frame, text=" Selector & Action Reference ")
+        self.notebook.add(tab_frame, text=" Selector Reference ")
         main_pane = ttk.PanedWindow(tab_frame, orient='vertical')
         main_pane.pack(fill='both', expand=True)
-        
         params_frame = ttk.LabelFrame(main_pane, text="Parameters (for filtering)")
-        main_pane.add(params_frame, weight=2)
+        main_pane.add(params_frame, weight=3)
         self.create_parameters_table(params_frame)
         self.populate_parameters_data()
-        
         operators_frame = ttk.LabelFrame(main_pane, text="Operators (for comparisons)")
-        main_pane.add(operators_frame, weight=1)
+        main_pane.add(operators_frame, weight=2)
         self.create_operators_table(operators_frame)
         self.populate_operators_data()
-        
         selectors_frame = ttk.LabelFrame(main_pane, text="Selectors & Sorting Keys")
-        main_pane.add(selectors_frame, weight=1)
+        main_pane.add(selectors_frame, weight=2)
         self.create_selectors_table(selectors_frame)
         self.populate_selectors_data()
-        
-        # --- BỔ SUNG BẢNG ACTIONS ---
-        actions_frame = ttk.LabelFrame(main_pane, text="Actions (for `run_action`)")
-        main_pane.add(actions_frame, weight=1)
-        self.create_actions_table(actions_frame)
-        self.populate_actions_data()
 
     # --- Sub-Tab 2: Framework API Reference ---
     def create_api_ref_tab(self):
@@ -346,37 +329,13 @@ class ReferenceTab(ttk.Frame):
         for selector in SELECTOR_DEFINITIONS:
             tags = ('recommended',) if 'RECOMMENDED' in selector['desc'] else ()
             self.selectors_tree.insert("", "end", values=(selector['name'], selector['example'], selector['desc']), tags=tags)
-
-    # --- BỔ SUNG: Hàm tạo và điền dữ liệu cho bảng Actions ---
-    def create_actions_table(self, parent):
-        parent.columnconfigure(0, weight=1); parent.rowconfigure(0, weight=1)
-        self.actions_tree = ttk.Treeview(parent, columns=("Action", "Example", "Description"), show="headings")
-        self.actions_tree.heading("Action", text="Action Name"); self.actions_tree.heading("Example", text="Example Usage"); self.actions_tree.heading("Description", text="Description")
-        self.actions_tree.column("Action", width=150, anchor='w'); self.actions_tree.column("Example", width=300, anchor='w'); self.actions_tree.column("Description", width=450, anchor='w')
-        v_scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.actions_tree.yview)
-        v_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.actions_tree.configure(yscrollcommand=v_scrollbar.set)
-        self.actions_tree.grid(row=0, column=0, sticky="nsew")
-        self.actions_tree.bind("<Button-3>", lambda e: self._show_context_menu(e, self.actions_tree))
-
-    def populate_actions_data(self):
-        categories = {}
-        for action in ACTION_DEFINITIONS:
-            cat = action['category']
-            if cat not in categories: categories[cat] = []
-            categories[cat].append(action)
-        for cat_name, action_list in sorted(categories.items()):
-            category_id = self.actions_tree.insert("", "end", values=(f"--- {cat_name} Actions ---", "", ""), open=True, tags=('category',))
-            for action in action_list:
-                self.actions_tree.insert(category_id, "end", values=(action['name'], action['example'], action['desc']))
-        self.actions_tree.tag_configure('category', background='#d3d3d3', foreground='black', font=('Segoe UI', 10, 'bold'))
     
     def populate_api_data(self):
         self.api_tree.tag_configure('class', background='#333', foreground='white', font=('Segoe UI', 10, 'bold'))
         self.api_tree.tag_configure('method', font=('Segoe UI', 9, 'bold'))
         self.api_tree.tag_configure('param', foreground='#555')
         for class_info in API_REFERENCE_DATA:
-            class_id = self.api_tree.insert("", "end", values=(class_info["class"], "", class_info["desc"]), open=True, tags=('class',))
+            class_id = self.api_tree.insert("", "end", values=(class_info["class"], "", ""), open=False, tags=('class',))
             for method_info in class_info["methods"]:
                 method_id = self.api_tree.insert(class_id, "end", values=("  " + method_info["name"], "", method_info["desc"]), open=False, tags=('method',))
                 for p_name, p_type, p_desc in method_info["params"]:
@@ -424,7 +383,7 @@ class ReferenceTab(ttk.Frame):
 class AutomationSuiteApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Automation Suite v5.4 (by KNT15083)")
+        self.title("Automation Suite v5.2 (by KNT15083)")
         self.geometry("1200x800")
         style = ttk.Style(self)
         style.theme_use('clam')
@@ -442,8 +401,7 @@ class AutomationSuiteApp(tk.Tk):
         self.status_label.pack(side='left', padx=5)
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        self.explorer_tab = ExplorerTab(self.notebook, suite_app=self, is_run_from_suite=True)
+        self.explorer_tab = ExplorerTab(self.notebook, suite_app=self)
         self.scanner_tab = ScannerConfigTab(self.notebook, suite_app=self)
         self.debugger_tab = DebuggerTab(self.notebook, suite_app=self)
         self.reference_tab = ReferenceTab(self.notebook)
@@ -465,10 +423,16 @@ class AutomationSuiteApp(tk.Tk):
 # ======================================================================
 
 API_REFERENCE_DATA = [
-    {"class": "UIController", "desc": "Handles finding, interacting, and waiting for UI elements.", "methods": [
+    {"class": "UIController", "methods": [
         {"name": "find_element(...)", "desc": "Finds a single element and returns its object for reuse.", "params": [
             ("window_spec", "dict", "Spec to find the parent window."),
             ("element_spec", "dict | None", "Spec to find the element within the window."),
+            ("timeout", "float | None", "Override default timeout."),
+            ("retry_interval", "float | None", "Override default retry interval."),
+        ]},
+        {"name": "create_snapshot(...)", "desc": "Scans a window once to find multiple elements.", "params": [
+            ("window_spec", "dict", "Spec to find the parent window."),
+            ("elements_map", "dict", "Map of friendly names to element specs."),
             ("timeout", "float | None", "Override default timeout."),
         ]},
         {"name": "run_action(...)", "desc": "Performs an action. Skips scan if `target` is provided.", "params": [
@@ -476,55 +440,34 @@ API_REFERENCE_DATA = [
             ("target", "UIAWrapper | None", "A pre-found element object to act upon."),
             ("window_spec", "dict | None", "Used if `target` is not provided."),
             ("element_spec", "dict | None", "Used if `target` is not provided."),
-        ]},
-        {"name": "get_property(...)", "desc": "Gets a specific property value from an element.", "params": [
-            ("property_name", "str", "Name of the property to get (e.g., 'pwa_title', 'uia_value')."),
-            ("target", "UIAWrapper | None", "A pre-found element object."),
-            ("window_spec", "dict | None", "Used to find the element if `target` is not provided."),
-            ("element_spec", "dict | None", "Used to find the element if `target` is not provided."),
-        ]},
-        {"name": "check_exists(...)", "desc": "Checks if an element exists without raising an error.", "params": [
-            ("window_spec", "dict", "Spec to find the parent window."),
-            ("element_spec", "dict | None", "Spec to find the element within the window."),
-            ("timeout", "float | None", "Time to wait for the element to appear."),
+            ("delay_before", "float = 0", "Pause in seconds before the action."),
+            ("delay_after", "float = 0", "Pause in seconds after the action."),
         ]},
         {"name": "wait_for_state(...)", "desc": "Waits for an element to reach a specific state.", "params": [
             ("state_spec", "dict", "The desired state (e.g., {'state_is_enabled': True})."),
             ("target", "UIAWrapper | None", "A pre-found element to monitor."),
+            ("window_spec", "dict | None", "Used to find the element if `target` is not provided."),
+            ("element_spec", "dict | None", "Used to find the element if `target` is not provided."),
             ("timeout", "float | None", "Max time to wait for the state."),
         ]},
-        {"name": "wait_for_event(...)", "desc": "Waits for a specific UI event to occur (e.g., a new window opening).", "params": [
-            ("events_to_wait_for", "str | list", "Event name(s) to wait for (e.g., 'window_opened')."),
-            ("timeout", "float | None", "Max time to wait for the event."),
-        ]},
-        {"name": "create_snapshot(...)", "desc": "Scans a window once to find and cache multiple elements.", "params": [
-            ("window_spec", "dict", "Spec to find the parent window."),
-            ("elements_map", "dict", "Map of friendly names to element specs."),
-        ]},
     ]},
-    {"class": "AppManager", "desc": "Manages the lifecycle (launch, attach, close) of an application.", "methods": [
+    {"class": "AppManager", "methods": [
         {"name": "launch(...)", "desc": "Launches an application from a command line.", "params": [
             ("wait_ready", "bool = True", "Wait for the main window to appear after launch."),
             ("timeout", "int | None", "Override default timeout for waiting."),
         ]},
         {"name": "attach(...)", "desc": "Attaches to a running application instance.", "params": [
+            ("timeout", "int | None", "Override default timeout."),
             ("on_conflict", "str = 'fail'", "Policy for multiple instances ('newest', 'relaunch', etc.)."),
             ("attach_timeout", "int = 3", "Short timeout to find an existing instance."),
         ]},
-        {"name": "close(...)", "desc": "Gracefully closes the application by closing its main window.", "params": [
-            ("timeout", "int | None", "Time to wait for the window to close."),
-        ]},
-        {"name": "kill()", "desc": "Forcefully terminates the application process.", "params": []},
-        {"name": "is_running()", "desc": "Checks if the application process is currently running.", "params": []},
-        {"name": "is_window_ready(...)", "desc": "Checks if the main window is visible and ready.", "params": [
-            ("timeout", "int | None", "Time to wait for the window to appear."),
-        ]},
     ]},
-    {"class": "ImageController", "desc": "Performs image-based automation (slower, use as fallback).", "methods": [
-        {"name": "image_action(...)", "desc": "Finds an image on screen and performs an action on it.", "params": [
+    {"class": "ImageController", "methods": [
+        {"name": "image_action(...)", "desc": "Finds an image and performs an action on it.", "params": [
             ("image_target", "str | list", "Path(s) to the image file(s)."),
             ("action", "str", "Action to perform (e.g., 'click')."),
             ("region", "tuple | None", "Optional (left, top, width, height) area to search in."),
+            ("confidence", "float | None", "Override default confidence (0.0 to 1.0)."),
         ]},
     ]}
 ]
@@ -533,183 +476,146 @@ API_EXAMPLES = {
     "find_element": """# Find a single element and store it in a variable for later use.
 # This is more efficient than re-scanning for every action.
 
+# Define specs for the window and the target element
 window_spec = {'pwa_title': 'File Explorer'}
 save_button_spec = {'pwa_title': 'Save', 'pwa_control_type': 'Button'}
 
+# Find the element once
 save_button = controller.find_element(
     window_spec=window_spec,
     element_spec=save_button_spec,
     timeout=10
 )
 
+# Reuse the found element object for multiple actions without re-scanning
 if save_button:
+    controller.run_action(target=save_button, action='focus')
     controller.run_action(target=save_button, action='click')""",
-
-    "run_action": """# `run_action` can either find an element and act, or act on a pre-found `target`.
-
-# --- Method 1: Find and Act (slower, good for single actions) ---
-controller.run_action(
-    window_spec={'pwa_title': 'Notepad'},
-    element_spec={'pwa_control_type': 'Edit'},
-    action='type_keys:Hello World!',
-    delay_after=0.5
-)
-
-# --- Method 2: Act on a Target (faster, best for multiple actions) ---
-# Assume `save_button` is a pre-found element object from `find_element`.
-controller.run_action(target=save_button, action='click')""",
-
-    "get_property": """# Use `get_property` to retrieve a value from an element.
-
-edit_area = controller.find_element(
-    window_spec={'pwa_title': ('icontains', 'Notepad')},
-    element_spec={'pwa_control_type': 'Edit'}
-)
-
-if edit_area:
-    current_text = controller.get_property(
-        target=edit_area,
-        property_name='uia_value'
-    )
-    print(f"The current text is: {current_text}")""",
-
-    "check_exists": """# Use `check_exists` to safely verify if an element is present
-# without stopping the script if it's not found.
-
-window_spec={'pwa_title': 'Login'}
-error_message_spec={'pwa_auto_id': 'errorLabel'}
-
-# After trying to log in, check if an error message appeared.
-if controller.check_exists(window_spec, error_message_spec, timeout=2):
-    print("Login failed, error message is visible.")
-else:
-    print("Login successful or no error message shown.")""",
-
-    "wait_for_state": """# Use `wait_for_state` to synchronize your script with the application.
-# It's more reliable and efficient than `time.sleep()`.
-
-process_button = controller.find_element(
-    window_spec={'pwa_title': 'Data Processor'},
-    element_spec={'pwa_title': 'Process'}
-)
-
-if process_button:
-    controller.run_action(target=process_button, action='click')
-
-    # Wait for the button to become enabled again, which indicates
-    # that the process is complete.
-    success = controller.wait_for_state(
-        target=process_button,
-        state_spec={'state_is_enabled': True},
-        timeout=60
-    )
-    print("Process finished!" if success else "Process timed out.")""",
-
-    "wait_for_event": """# Use `wait_for_event` to pause the script until a specific UI event happens.
-# This requires the event listener to be started (usually in AppManager).
-
-# Example: Click 'File' -> 'New' and wait for the new window to open.
-app.run_action(element_spec={'pwa_title': 'File'}, action='click')
-app.run_action(element_spec={'pwa_title': 'New'}, action='click')
-
-# Wait up to 5 seconds for any new window to open.
-event_result = app.wait_for_event('window_opened', timeout=5)
-
-if event_result.is_success:
-    new_window = event_result.element
-    print(f"New window opened with title: {new_window.window_text()}")""",
 
     "create_snapshot": """# Create a "snapshot" of a static UI screen to interact with
 # multiple elements very quickly. This performs only ONE scan.
 
+# 1. Define all elements of interest on the login screen
 login_elements_map = {
     'user_field': {'pwa_auto_id': 'usernameInput'},
     'pass_field': {'pwa_auto_id': 'passwordInput'},
     'login_btn':  {'pwa_title': 'Login', 'pwa_control_type': 'Button'}
 }
 
+# 2. Scan the window once to capture all defined elements
 login_screen = controller.create_snapshot(
     window_spec={'pwa_title': 'Login Window'},
     elements_map=login_elements_map
 )
 
+# 3. Interact with the captured elements instantly
 if login_screen:
     controller.run_action(target=login_screen['user_field'], action='type_keys:admin')
     controller.run_action(target=login_screen['pass_field'], action='type_keys:password123')
     controller.run_action(target=login_screen['login_btn'], action='click')""",
+
+    "run_action": """# `run_action` is a versatile method.
+# It can either find an element and act, or act on a pre-found `target`.
+
+# --- Method 1: Find and Act (slower, good for single actions) ---
+controller.run_action(
+    window_spec={'pwa_title': 'Notepad'},
+    element_spec={'pwa_control_type': 'Edit'},
+    action='type_keys:Hello World!',
+    delay_after=0.5  # Wait 0.5s after typing
+)
+
+# --- Method 2: Act on a Target (faster, best for multiple actions) ---
+# (See `find_element` or `create_snapshot` examples)
+# Assume `save_button` is a pre-found element object
+controller.run_action(target=save_button, action='click')""",
+
+    "wait_for_state": """# Use `wait_for_state` to synchronize your script with the application's state.
+# It's more reliable and efficient than `time.sleep()`.
+
+# Find the process button first
+process_button = controller.find_element(
+    window_spec={'pwa_title': 'Data Processor'},
+    element_spec={'pwa_title': 'Process'}
+)
+
+if process_button:
+    # Click the button, which starts a long process and disables the button
+    controller.run_action(target=process_button, action='click')
+
+    # Now, wait for the button to become enabled again, which indicates
+    # that the process is complete.
+    print("Waiting for process to complete...")
+    success = controller.wait_for_state(
+        target=process_button,
+        state_spec={'state_is_enabled': True},
+        timeout=60  # Wait for up to 60 seconds
+    )
+
+    if success:
+        print("Process finished successfully!")
+    else:
+        print("Process timed out or failed.")""",
     
-    "launch": """# Launch Notepad and wait for its window to be ready.
-app = AppManager(
-    name="Notepad",
-    command_line="notepad.exe",
-    main_window_spec={'pwa_class_name': 'Notepad'}
-)
-app.launch()""",
-
-    "attach": """# Attach to an already running instance of File Explorer.
-app = AppManager(
-    name="Explorer",
-    command_line="explorer.exe",
-    main_window_spec={'pwa_class_name': 'CabinetWClass'}
-)
-if app.attach(on_conflict='newest'):
-    print(f"Attached to Explorer with title: {app.get_title()}")""",
-
-    "close": """# Gracefully close the Notepad application.
-app.close(timeout=5)""",
-
-    "kill": """# Force-close the application if it's not responding.
-app.kill()""",
-
-    "is_running": """# Check if the process is active.
-if app.is_running():
-    print("Application is running.")
-else:
-    print("Application has been closed.")""",
-
-    "is_window_ready": """# Check if the main window is visible on the screen.
-if app.is_window_ready(timeout=5):
-    print("Main window is visible.")""",
-
-    "image_action": """# As a last resort, use image recognition to click a button.
-# This is slower and less reliable than using UI properties.
-img_controller = ImageController()
-img_controller.image_action(
-    image_target='path/to/save_button_image.png',
-    action='click',
-    confidence=0.9
-)""",
-
     "StatusNotifier": """# --- How to use StatusNotifier ---
 from ui_notifier import StatusNotifier
 import time
 
+# 1. Initialize the notifier (usually at the start of your script)
 notifier = StatusNotifier()
-notifier.update_status("Starting...", style='process')
+
+# 2. Use it to provide feedback throughout your script
+notifier.update_status("Starting automation...", style='process')
 time.sleep(2)
-notifier.update_status("Success!", style='success', duration=5)
-time.sleep(6)
-notifier.stop()
+
+try:
+    # Simulate a successful operation
+    notifier.update_status("Data saved successfully!", style='success', duration=5)
+    time.sleep(6)
+
+    # Simulate an error
+    raise ValueError("Network connection lost")
+
+except Exception as e:
+    notifier.update_status(f"An error occurred: {e}", style='error', duration=0) # duration=0 means it stays until dismissed
+    time.sleep(10)
+
+finally:
+    # 3. Stop the notifier's GUI thread at the end
+    notifier.stop()
 """,
 
     "AutomationControlPanel": """# --- How to use the Control Panel ---
 from ui_notifier import StatusNotifier
 from ui_control_panel import AutomationState, AutomationControlPanel
 from core_controller import UIController
+import time
 
-# 1. Initialize state management objects
+# 1. Initialize the state management objects
 notifier = StatusNotifier()
 automation_state = AutomationState()
 control_panel = AutomationControlPanel(automation_state, notifier)
 
-# 2. Pass `automation_state` to the controller
+# 2. Pass the `automation_state` to the controller
 controller = UIController(
     notifier=notifier,
     automation_state=automation_state
 )
 
-# Now, any action run via this controller instance can be
-# paused or stopped from the control panel window.
+# 3. Your automation logic will now be pausable/stoppable
+for i in range(10):
+    # The controller automatically checks the state before each action
+    controller.run_action(
+        window_spec={'pwa_title': 'Notepad'},
+        element_spec={'pwa_control_type': 'Edit'},
+        action=f'type_keys:Line {i+1}\\n',
+        description=f"Typing line {i+1}"
+    )
+    time.sleep(1) # Simulate work
+
+# 4. Clean up at the end
+notifier.stop()
+control_panel.close()
 """
 }
 
