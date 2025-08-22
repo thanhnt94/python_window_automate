@@ -1,11 +1,10 @@
 # image_automation.py
-# --- VERSION 3.0 (Regional Search Optimization):
-# - All major public methods (`wait_for_image`, `image_action`) now accept an
-#   optional `region` parameter (a tuple of left, top, width, height).
-# - If `region` is provided, pyautogui will only take a screenshot of and
-#   search within that specific area, dramatically improving performance.
-# - If `region` is None, it defaults to searching the full screen as before.
-# - Coordinate calculations are now correctly adjusted based on the region's offset.
+# --- VERSION 3.1 (Human Activity Refactor):
+# - Tách lớp HumanActivityListener ra một file riêng (human_activity_listener.py)
+#   để loại bỏ mã trùng lặp và cải thiện khả năng tái sử dụng.
+# - ImageController giờ đây sử dụng HumanActivityListener từ file mới, truyền
+#   notifier vào cho nó để hiển thị thông báo tạm dừng/tiếp tục.
+# - Cập nhật logic _wait_for_user_idle() để tương thích với cấu trúc mới.
 
 import os
 import time
@@ -33,53 +32,25 @@ try:
     # from .ui_toolkit import ImageUtils 
     from .ui_notifier import StatusNotifier
     from .ui_control_panel import AutomationState
+    from .human_activity_listener import HumanActivityListener
 except ImportError:
     # Fallback for standalone execution
     try:
         from ui_notifier import StatusNotifier
         from ui_control_panel import AutomationState
+        from human_activity_listener import HumanActivityListener
     except ImportError:
-        print("CRITICAL ERROR: A required module (ui_notifier, ui_control_panel) could not be found.")
+        print("CRITICAL ERROR: A required module (ui_notifier, ui_control_panel, human_activity_listener) could not be found.")
         # Dummy classes to prevent crash
         class StatusNotifier:
             def update_status(self, *args, **kwargs): pass
         class AutomationState:
             def is_stopped(self): return False
             def is_paused(self): return False
+        class HumanActivityListener:
+            def __init__(self, *args, **kwargs): pass
+            def wait_for_user_idle(self, *args): pass
         print("Warning: Core UI modules not found. ImageController will have limited functionality.")
-
-# =============================================================================
-# --- HUMAN ACTIVITY LISTENER (Simplified version from core_controller) ---
-# =============================================================================
-class HumanActivityListener:
-    """Encapsulates logic for detecting user input to pause automation."""
-    def __init__(self, cooldown_period: float):
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.cooldown_period = cooldown_period
-        self._last_human_activity_time: float = time.time() - cooldown_period
-        self._lock = threading.Lock()
-        
-        self._listener_thread = threading.Thread(target=self._run_listeners, daemon=True)
-        self._listener_thread.start()
-        self.logger.info("Human activity listener started.")
-
-    def _update_last_activity(self, *args):
-        with self._lock:
-            self._last_human_activity_time = time.time()
-
-    def get_last_activity_time(self) -> float:
-        with self._lock:
-            return self._last_human_activity_time
-
-    def _run_listeners(self):
-        try:
-            if not mouse or not keyboard: return
-            with mouse.Listener(on_move=self._update_last_activity, on_click=self._update_last_activity, on_scroll=self._update_last_activity) as m_listener:
-                with keyboard.Listener(on_press=self._update_last_activity) as k_listener:
-                    m_listener.join()
-                    k_listener.join()
-        except Exception as e:
-            self.logger.error(f"Error in input listener thread: {e}", exc_info=True)
 
 # =============================================================================
 # --- IMAGE CONTROLLER CLASS DEFINITION ---
@@ -113,7 +84,16 @@ class ImageController:
         self.human_interruption_enabled = human_interruption_detection and mouse and keyboard
         self.activity_listener = None
         if self.human_interruption_enabled:
-            self.activity_listener = HumanActivityListener(cooldown_period=human_cooldown_period)
+            # Tạo instance mới của HumanActivityListener đã được refactor
+            # Chú ý: ImageController không có _bot_acting_lock, vì vậy chúng ta cần tạo một cái giả
+            self.temp_lock = threading.Lock()
+            self.temp_bot_acting_ref = [False]
+            self.activity_listener = HumanActivityListener(
+                cooldown_period=human_cooldown_period,
+                bot_acting_lock=self.temp_lock,
+                is_bot_acting_ref=self.temp_bot_acting_ref,
+                notifier=notifier
+            )
         log_msg = f"ImageController initialized. Human interruption: {'Enabled' if self.human_interruption_enabled else 'Disabled'}"
         self._emit_event(log_msg, style='debug')
 
@@ -127,16 +107,8 @@ class ImageController:
                 logging.error(f"Failed to emit notification: {e}")
 
     def _wait_for_user_idle(self):
-        if not self.activity_listener:
-            return
-        is_paused_by_human = False
-        while time.time() - self.activity_listener.get_last_activity_time() < self.activity_listener.cooldown_period:
-            if not is_paused_by_human:
-                self._emit_event(f"User activity detected! Pausing for {self.activity_listener.cooldown_period}s...", style='warning', duration=self.activity_listener.cooldown_period)
-                is_paused_by_human = True
-            time.sleep(1)
-        if is_paused_by_human:
-            self._emit_event("User is idle. Resuming automation.", style='success', duration=2)
+        if self.activity_listener:
+            self.activity_listener.wait_for_user_idle()
 
     def wait_for_image(
         self,
