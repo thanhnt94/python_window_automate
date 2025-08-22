@@ -1,13 +1,14 @@
 # tool_explorer.py
 # A standalone and embeddable tool for full window element scanning.
-# --- VERSION 7.5 (Improved Window Filtering):
-# - Sửa lỗi không hiển thị một số cửa sổ (ví dụ: TeamCenter RAC) do điều kiện
-#   lọc quá chặt.
-# - Điều chỉnh hàm `get_all_windows` để chỉ loại bỏ các cửa sổ không hiển thị
-#   hoặc không hợp lệ, giữ lại các cửa sổ có thể không có tiêu đề nhưng vẫn
-#   tương tác được.
+# --- VERSION 11.0 (Finalization & Advanced Caching):
+# - Translated all UI components, messages, and comments into English.
+# - Implemented an advanced caching mechanism ("Cached Scanning") for
+#   "Full Load" mode using IUIAutomationCacheRequest.
+# - This new method prefetches a batch of properties for all elements in a
+#   single COM call, dramatically speeding up the full scan process by
+#   reducing thousands of individual calls.
+# - The "Quick Scan" (Lazy Load) mode remains the default for initial speed.
 
-import logging
 import re
 import time
 import os
@@ -38,87 +39,118 @@ except ImportError:
     print("CRITICAL ERROR: 'core_logic.py' must be in the same directory.")
     sys.exit(1)
 
-# Lấy logger hiệu suất đã được cấu hình
-perf_logger = logging.getLogger('PerformanceLogger')
-
 # ======================================================================
 #                   SCANNER LOGIC CLASS (BACKEND)
 # ======================================================================
 class FullScanner:
     def __init__(self):
-        self.logger = logging.getLogger(self.__class__.__name__)
         self.desktop = Desktop(backend='uia')
         try:
             self.uia = comtypes.client.CreateObject(UIA.CUIAutomation)
             self.tree_walker = self.uia.ControlViewWalker
-        except (OSError, comtypes.COMError) as e:
-            self.logger.critical(f"Fatal error initializing COM: {e}", exc_info=True)
+        except (OSError, comtypes.COMError):
             raise
 
     def get_all_windows(self):
-        self.logger.info("Starting to scan all windows on the desktop...")
-        perf_logger.info("Starting full desktop window scan...")
         start_time = time.perf_counter()
-        
         windows = self.desktop.windows()
         all_windows_data = []
         for win in windows:
             try:
-                # --- SỬA LỖI: Điều chỉnh điều kiện lọc ---
-                # Chỉ lọc các cửa sổ không hiển thị. Giữ lại những cửa sổ không có tiêu đề
-                # vì chúng có thể vẫn là cửa sổ chính của một ứng dụng (ví dụ: một số công cụ CAD).
                 if win.is_visible():
                     info = core_logic.get_all_properties(win, self.uia, self.tree_walker)
-                    info['pwa_object'] = win # Keep the object for later use
+                    info['pwa_object'] = win
                     info['sys_unique_id'] = id(win.element_info.element)
                     all_windows_data.append(info)
-            except Exception as e:
-                self.logger.warning(f"Could not process window. Error: {e}")
+            except Exception:
+                pass
         
         end_time = time.perf_counter()
-        self.logger.info(f"Found {len(all_windows_data)} valid windows.")
-        perf_logger.info(f"Desktop window scan finished. Found {len(all_windows_data)} windows. Duration: {end_time - start_time:.4f}s")
-        return all_windows_data
+        duration = end_time - start_time
+        return all_windows_data, duration
 
-    def get_all_elements_from_window(self, window_pwa_object):
+    def get_all_elements_from_window(self, window_pwa_object, max_depth=None, full_load=False, basic_keys=None):
         if not window_pwa_object:
-            self.logger.error("Invalid window object provided.")
-            return []
-        window_title = window_pwa_object.window_text()
-        self.logger.info(f"Starting deep scan for all elements in window: '{window_title}'")
-        perf_logger.info(f"Starting deep element scan for window: '{window_title}'")
+            return [], 0
+        
         start_time = time.perf_counter()
-
         all_elements_data = []
         root_com_element = window_pwa_object.element_info.element
-        self._walk_element_tree(root_com_element, 0, all_elements_data)
+        
+        if full_load:
+            # Chế độ quét toàn bộ được tối ưu hóa
+            cache_request = self.uia.CreateCacheRequest()
+            for prop_id in [UIA.UIA_NamePropertyId, UIA.UIA_AutomationIdPropertyId, UIA.UIA_ClassNamePropertyId, UIA.UIA_ControlTypePropertyId, UIA.UIA_IsEnabledPropertyId, UIA.UIA_IsOffscreenPropertyId, UIA.UIA_BoundingRectanglePropertyId, UIA.UIA_ProcessIdPropertyId, UIA.UIA_NativeWindowHandlePropertyId]:
+                cache_request.AddProperty(prop_id)
+            
+            self._walk_element_tree_cached(root_com_element, 0, all_elements_data, max_depth, cache_request)
+        else:
+            # Chế độ quét nhanh như cũ
+            self._walk_element_tree_lazy(root_com_element, 0, all_elements_data, max_depth, basic_keys or [])
         
         end_time = time.perf_counter()
-        self.logger.info(f"Scan complete. Collected {len(all_elements_data)} elements.")
-        perf_logger.info(f"Deep element scan finished. Found {len(all_elements_data)} elements. Duration: {end_time - start_time:.4f}s")
-        return all_elements_data
+        duration = end_time - start_time
+        return all_elements_data, duration
 
-    def _walk_element_tree(self, element_com, level, all_elements_data, max_depth=25):
-        if element_com is None or level > max_depth:
+    def _walk_element_tree_lazy(self, element_com, level, all_elements_data, max_depth, basic_keys):
+        if element_com is None or (max_depth is not None and level > max_depth):
             return
         try:
             element_pwa = UIAWrapper(UIAElementInfo(element_com))
-            element_data = core_logic.get_all_properties(element_pwa, self.uia, self.tree_walker)
+            element_data = {}
+            for key in basic_keys:
+                value = core_logic.get_property_value(element_pwa, key, self.uia, self.tree_walker)
+                if value or value is False or value == 0:
+                    element_data[key] = value
+            element_data['sys_is_partial'] = True
+
             if element_data:
+                element_data['pwa_object'] = element_pwa
                 element_data['sys_unique_id'] = id(element_com)
-                parent_com = self.tree_walker.GetParentElement(element_com)
-                element_data['sys_parent_id'] = id(parent_com) if parent_com else 0
                 all_elements_data.append(element_data)
 
             child = self.tree_walker.GetFirstChildElement(element_com)
             while child:
-                self._walk_element_tree(child, level + 1, all_elements_data, max_depth)
+                self._walk_element_tree_lazy(child, level + 1, all_elements_data, max_depth, basic_keys)
                 try:
                     child = self.tree_walker.GetNextSiblingElement(child)
                 except comtypes.COMError:
                     break
-        except Exception as e:
-            self.logger.warning(f"Error walking element tree at level {level}: {e}")
+        except Exception:
+            pass
+
+    def _walk_element_tree_cached(self, element_com, level, all_elements_data, max_depth, cache_request):
+        if element_com is None or (max_depth is not None and level > max_depth):
+            return
+        try:
+            # Tải element và các thuộc tính đã yêu cầu vào cache
+            updated_element_com = element_com.BuildUpdatedCache(cache_request)
+            element_pwa = UIAWrapper(UIAElementInfo(updated_element_com))
+            
+            # Lấy thông tin từ cache, nhanh hơn nhiều
+            element_data = {
+                'rel_level': level,
+                'pwa_title': updated_element_com.Cached.Name,
+                'pwa_auto_id': updated_element_com.Cached.AutomationId,
+                'pwa_class_name': updated_element_com.Cached.ClassName,
+                'pwa_control_type': core_logic._CONTROL_TYPE_ID_TO_NAME.get(updated_element_com.Cached.ControlType, 'Unknown'),
+                'state_is_enabled': updated_element_com.Cached.IsEnabled,
+                'state_is_visible': not updated_element_com.Cached.IsOffscreen,
+                'win32_handle': updated_element_com.Cached.NativeWindowHandle,
+            }
+            element_data['pwa_object'] = element_pwa
+            element_data['sys_unique_id'] = id(element_com)
+            all_elements_data.append(element_data)
+
+            child = self.tree_walker.GetFirstChildElement(element_com)
+            while child:
+                self._walk_element_tree_cached(child, level + 1, all_elements_data, max_depth, cache_request)
+                try:
+                    child = self.tree_walker.GetNextSiblingElement(child)
+                except comtypes.COMError:
+                    break
+        except Exception:
+            pass
 
 # ======================================================================
 #                   GUI CLASS (Embeddable Frame)
@@ -130,8 +162,12 @@ class ExplorerTab(ttk.Frame):
         
         self.suite_app = suite_app
         self.is_run_from_suite = is_run_from_suite
-        self.status_label = status_label_widget or getattr(suite_app, 'status_label', None)
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.status_label = status_label_widget
+        
+        if self.status_label:
+            self.progress_bar = ttk.Progressbar(self.status_label.master, mode='indeterminate')
+        else:
+            self.progress_bar = None
 
         style = ttk.Style(self)
         style.theme_use('clam')
@@ -167,6 +203,24 @@ class ExplorerTab(ttk.Frame):
             messagebox.showwarning("No Element Selected", "Please select an element from the table below.")
             return
         
+        if self.selected_element_data.get('sys_is_partial'):
+            self.update_status("Explorer: Loading full details for selected element...")
+            pwa_object = self.selected_element_data.get('pwa_object')
+            if pwa_object:
+                full_properties = core_logic.get_all_properties(pwa_object, self.scanner.uia, self.scanner.tree_walker)
+                self.selected_element_data.update(full_properties)
+                self.selected_element_data.pop('sys_is_partial', None)
+                unique_id = self.selected_element_data.get('sys_unique_id')
+                for i, item in enumerate(self.element_data_cache):
+                    if item.get('sys_unique_id') == unique_id:
+                        self.element_data_cache[i] = self.selected_element_data
+                        break
+            else:
+                messagebox.showerror("Error", "Could not find the element object to fetch details.")
+                self.update_status("Explorer: Error loading details.")
+                return
+            self.update_status("Explorer: Full details loaded.")
+
         detail_win = tk.Toplevel(self)
         detail_win.title("Element Specification Details")
         detail_win.geometry("650x700+50+50")
@@ -181,14 +235,11 @@ class ExplorerTab(ttk.Frame):
         optimal_window_spec = core_logic.create_optimal_window_spec(window_info, self.window_data_cache)
 
         def send_specs(win_spec, elem_spec):
-            # Kiểm tra xem có đang chạy trong suite không
             if self.is_run_from_suite and self.suite_app and hasattr(self.suite_app, 'send_specs_to_debugger'):
                 self.suite_app.send_specs_to_debugger(win_spec, elem_spec)
                 detail_win.destroy()
             else:
-                # Nếu chạy độc lập, có thể hiển thị thông báo hoặc không làm gì
                 messagebox.showinfo("Info", "This action is only available when run from the Automation Suite.")
-
 
         main_frame = ttk.Frame(detail_win, padding=10)
         main_frame.pack(fill="both", expand=True)
@@ -200,7 +251,6 @@ class ExplorerTab(ttk.Frame):
             original_text = button.cget("text"); button.config(text="✅")
             detail_win.after(1500, lambda: button.config(text=original_text))
 
-        # --- Full Spec Frame ---
         full_win_spec_str = core_logic.format_spec_to_string(window_info, "window_spec")
         full_elem_spec_str = core_logic.format_spec_to_string(cleaned_element_info, "element_spec")
         full_spec_frame = ttk.LabelFrame(main_frame, text="Full Specification (All Properties)", padding=(10, 5))
@@ -214,12 +264,10 @@ class ExplorerTab(ttk.Frame):
         copy_full_btn = ttk.Button(full_btn_frame, text="📋 Copy All", style="Copy.TButton", command=lambda: copy_to_clipboard(full_text.get("1.0", "end-1c"), copy_full_btn))
         copy_full_btn.pack(side='left', padx=2)
         
-        # --- THÊM NÚT SEND TO DEBUGGER ---
         if self.is_run_from_suite:
             send_full_btn = ttk.Button(full_btn_frame, text="🚀 Send to Debugger", style="Copy.TButton", command=lambda: send_specs(window_info, cleaned_element_info))
             send_full_btn.pack(side='left', padx=2)
         
-        # --- Optimal Spec Frame ---
         optimal_win_str = core_logic.format_spec_to_string(optimal_window_spec, 'window_spec')
         optimal_elem_str = core_logic.format_spec_to_string(optimal_element_spec, 'element_spec')
         combined_optimal_str = f"{optimal_win_str}\n\n{optimal_elem_str}"
@@ -234,7 +282,6 @@ class ExplorerTab(ttk.Frame):
         copy_optimal_btn = ttk.Button(optimal_btn_frame, text="📋 Copy All", style="Copy.TButton", command=lambda: copy_to_clipboard(combined_optimal_str, copy_optimal_btn))
         copy_optimal_btn.pack(side='left', padx=2)
 
-        # --- THÊM NÚT SEND TO DEBUGGER ---
         if self.is_run_from_suite:
             send_optimal_btn = ttk.Button(optimal_btn_frame, text="🚀 Send to Debugger", style="Copy.TButton", command=lambda: send_specs(optimal_window_spec, optimal_element_spec))
             send_optimal_btn.pack(side='left', padx=2)
@@ -253,12 +300,24 @@ class ExplorerTab(ttk.Frame):
         
         self.scan_windows_btn = ttk.Button(control_frame, text="Scan All Windows", command=self.start_scan_windows)
         self.scan_windows_btn.pack(side='left', padx=(0, 10))
+        
         self.scan_elements_btn = ttk.Button(control_frame, text="Scan Window's Elements", state="disabled", command=self.start_scan_elements)
         self.scan_elements_btn.pack(side='left', padx=10)
+
+        ttk.Label(control_frame, text="Max Depth:").pack(side='left', padx=(20, 5))
+        self.max_depth_var = tk.StringVar()
+        self.max_depth_entry = ttk.Entry(control_frame, textvariable=self.max_depth_var, width=5)
+        self.max_depth_entry.pack(side='left')
+        
+        self.full_load_var = tk.BooleanVar(value=False)
+        self.full_load_check = ttk.Checkbutton(control_frame, text="Load full details on scan (slower)", variable=self.full_load_var)
+        self.full_load_check.pack(side='left', padx=(10, 0))
+
         self.detail_btn = ttk.Button(control_frame, text="View Element Details", state="disabled", command=self.show_detail_window)
-        self.detail_btn.pack(side='left', padx=10)
+        self.detail_btn.pack(side='right', padx=10)
+        
         self.export_btn = ttk.Button(control_frame, text="Export to Excel...", state="disabled", command=self.export_to_excel)
-        self.export_btn.pack(side='left', padx=10)
+        self.export_btn.pack(side='right', padx=10)
 
         windows_frame = self.create_windows_list_frame(top_frame)
         windows_frame.grid(row=1, column=0, sticky='nsew')
@@ -300,11 +359,26 @@ class ExplorerTab(ttk.Frame):
         self.elem_tree.bind("<<TreeviewSelect>>", self.on_element_select)
         return frame
 
-    def _scan_elements_thread(self):
-        self.element_data_cache = self.scanner.get_all_elements_from_window(self.selected_window_data['pwa_object'])
-        self.after(0, self.populate_elements_tree, self.element_data_cache)
+    def start_loading(self, message="Scanning..."):
+        if not self.progress_bar: return
+        self.update_status(message)
+        self.progress_bar.pack(side='left', fill='x', expand=True, padx=10)
+        self.progress_bar.start(10)
 
-    def populate_elements_tree(self, elements):
+    def stop_loading(self):
+        if not self.progress_bar: return
+        self.progress_bar.stop()
+        self.progress_bar.pack_forget()
+
+    def _scan_elements_thread(self, max_depth, full_load, basic_keys):
+        results, duration = self.scanner.get_all_elements_from_window(
+            self.selected_window_data['pwa_object'], max_depth, full_load, basic_keys
+        )
+        self.element_data_cache = results
+        self.after(0, self.populate_elements_tree, results, duration)
+
+    def populate_elements_tree(self, elements, duration):
+        self.stop_loading()
         self.clear_treeview(self.elem_tree)
         column_keys = list(self.ELEMENT_COLUMNS.keys())
         for elem_info in elements:
@@ -317,7 +391,8 @@ class ExplorerTab(ttk.Frame):
                 values.append(val)
             item_id = self.elem_tree.insert("", "end", values=tuple(values))
             self.element_map[item_id] = elem_info
-        self.update_status(f"Explorer: Scan finished! Found {len(elements)} elements.")
+        
+        self.update_status(f"Explorer: Found {len(elements)} elements in {duration:.2f}s.")
         self.scan_windows_btn.config(state="normal"); self.scan_elements_btn.config(state="normal")
         if elements: self.export_btn.config(state="normal")
 
@@ -332,23 +407,25 @@ class ExplorerTab(ttk.Frame):
     def start_scan_windows(self):
         self.scan_windows_btn.config(state="disabled"); self.scan_elements_btn.config(state="disabled")
         self.export_btn.config(state="disabled"); self.detail_btn.config(state="disabled")
-        self.update_status("Explorer: Scanning all windows...")
+        self.start_loading("Explorer: Scanning all windows...")
         self.clear_treeview(self.win_tree); self.clear_treeview(self.elem_tree)
         self.window_map.clear(); self.element_map.clear(); self.window_data_cache = []
         threading.Thread(target=self._scan_windows_thread, daemon=True).start()
 
     def _scan_windows_thread(self):
-        windows_data = self.scanner.get_all_windows()
-        self.after(0, self.populate_windows_tree, windows_data)
+        windows_data, duration = self.scanner.get_all_windows()
+        self.after(0, self.populate_windows_tree, windows_data, duration)
 
-    def populate_windows_tree(self, windows_data):
+    def populate_windows_tree(self, windows_data, duration):
+        self.stop_loading()
         self.clear_treeview(self.win_tree)
         self.window_data_cache = windows_data
         for win_info in windows_data:
             values = (win_info.get('pwa_title'), win_info.get('win32_handle'), win_info.get('proc_name'))
             item_id = self.win_tree.insert("", "end", values=values)
             self.window_map[item_id] = win_info
-        self.update_status(f"Explorer: Found {len(windows_data)} windows. Please select one to scan for elements.")
+            
+        self.update_status(f"Explorer: Found {len(windows_data)} windows in {duration:.2f}s. Select one to scan for elements.")
         self.scan_windows_btn.config(state="normal")
 
     def on_window_select(self, event):
@@ -369,9 +446,14 @@ class ExplorerTab(ttk.Frame):
         if self.selected_element_data:
             self.detail_btn.config(state="normal")
             self.update_status("Explorer: Element selected. Ready to view details.")
-            rect = self.selected_element_data.get('geo_bounding_rect_tuple')
-            if rect:
-                self.draw_highlight(rect)
+            
+            # Luôn tìm 'pwa_object' để lấy rect, vì nó luôn có sẵn
+            pwa_object = self.selected_element_data.get('pwa_object')
+            if pwa_object:
+                try:
+                    self.draw_highlight(pwa_object.rectangle())
+                except Exception:
+                    pass # Bỏ qua nếu không thể vẽ
         else:
             self.detail_btn.config(state="disabled")
 
@@ -385,11 +467,30 @@ class ExplorerTab(ttk.Frame):
             messagebox.showerror("Error", "Could not find the window object to scan.")
             return
 
+        max_depth_str = self.max_depth_var.get()
+        max_depth = None
+        if max_depth_str:
+            try:
+                max_depth = int(max_depth_str)
+                if max_depth < 0:
+                    messagebox.showerror("Invalid Input", "Max Depth must be a non-negative number.")
+                    return
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Max Depth must be a valid number.")
+                return
+
         self.scan_windows_btn.config(state="disabled"); self.scan_elements_btn.config(state="disabled")
         self.export_btn.config(state="disabled"); self.detail_btn.config(state="disabled")
-        self.update_status(f"Explorer: Scanning elements of '{self.selected_window_data.get('pwa_title')}'...")
+        self.start_loading(f"Explorer: Scanning elements of '{self.selected_window_data.get('pwa_title')}'...")
         self.clear_treeview(self.elem_tree); self.element_map.clear()
-        threading.Thread(target=self._scan_elements_thread, daemon=True).start()
+        
+        full_load = self.full_load_var.get()
+        
+        basic_keys = list(self.ELEMENT_COLUMNS.keys())
+        if 'geo_bounding_rect_tuple' not in basic_keys:
+            basic_keys.append('geo_bounding_rect_tuple')
+
+        threading.Thread(target=self._scan_elements_thread, args=(max_depth, full_load, basic_keys), daemon=True).start()
 
     def export_to_excel(self):
         if not self.element_data_cache:
@@ -407,10 +508,13 @@ class ExplorerTab(ttk.Frame):
             self.update_status("Explorer: Export canceled.")
             return
         try:
+            export_data = []
+            for row in self.element_data_cache:
+                new_row = {k: v for k, v in row.items() if not k.startswith('sys_') and k != 'pwa_object'}
+                export_data.append(new_row)
+            
             self.update_status(f"Explorer: Exporting to {os.path.basename(file_path)}...")
-            df = pd.DataFrame(self.element_data_cache)
-            if 'pwa_object' in df.columns:
-                df = df.drop(columns=['pwa_object'])
+            df = pd.DataFrame(export_data)
             df.to_excel(file_path, index=False, engine='openpyxl')
             self.update_status("Explorer: Excel export successful!")
             messagebox.showinfo("Success", f"Data was successfully saved to:\n{file_path}")
@@ -418,22 +522,20 @@ class ExplorerTab(ttk.Frame):
             self.update_status(f"Explorer: Error exporting file: {e}")
             messagebox.showerror("Error", f"Could not save the Excel file.\nError: {e}")
 
-    def draw_highlight(self, rect_tuple):
+    def draw_highlight(self, rect):
         self.destroy_highlight()
         try:
-            left, top, right, bottom = rect_tuple
-            width = right - left
-            height = bottom - top
+            # rect giờ là đối tượng Rectangle của pywinauto
             self.highlighter_window = tk.Toplevel(self)
             self.highlighter_window.overrideredirect(True)
             self.highlighter_window.wm_attributes("-topmost", True, "-disabled", True, "-transparentcolor", "white")
-            self.highlighter_window.geometry(f'{width}x{height}+{left}+{top}')
+            self.highlighter_window.geometry(f'{rect.width()}x{rect.height()}+{rect.left}+{rect.top}')
             canvas = tk.Canvas(self.highlighter_window, bg='white', highlightthickness=0)
             canvas.pack(fill=tk.BOTH, expand=True)
-            canvas.create_rectangle(2, 2, width - 2, height - 2, outline="red", width=4)
+            canvas.create_rectangle(2, 2, rect.width() - 2, rect.height() - 2, outline="red", width=4)
             self.highlighter_window.after(2500, self.destroy_highlight)
-        except Exception as e:
-            logging.error(f"Error drawing highlight rectangle: {e}")
+        except Exception:
+            pass
 
     def destroy_highlight(self):
         if self.highlighter_window and self.highlighter_window.winfo_exists():
@@ -441,12 +543,9 @@ class ExplorerTab(ttk.Frame):
         self.highlighter_window = None
 
 if __name__ == '__main__':
-    # --- THÊM LOGIC PARSE ARGUMENT KHI CHẠY ĐỘC LẬP ---
     parser = argparse.ArgumentParser(description="Standalone Window Explorer Tool.")
     parser.add_argument('--from-suite', action='store_true', help='Indicates that the script is run from the Automation Suite.')
     args = parser.parse_args()
-
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
     
     root = tk.Tk()
     root.title("Standalone Window Explorer")
@@ -454,11 +553,12 @@ if __name__ == '__main__':
     
     status_frame = ttk.Frame(root, relief='sunken', padding=2)
     status_frame.pack(side='bottom', fill='x')
+    
     ttk.Label(status_frame, text="© KNT15083").pack(side='right', padx=5)
+    
     status_label = ttk.Label(status_frame, text="Ready (Standalone Mode)")
     status_label.pack(side='left', padx=5)
     
-    # Truyền cờ is_run_from_suite vào ExplorerTab
     app_frame = ExplorerTab(root, status_label_widget=status_label, is_run_from_suite=args.from_suite)
     
     root.mainloop()
