@@ -1,15 +1,12 @@
 # tool_debugger.py
-# --- VERSION 3.5 (COM Threading Fix):
-# - Sửa lỗi nghiêm trọng khiến các chế độ tìm kiếm nâng cao (cached, hybrid)
-#   thất bại và quay về chế độ standard.
-# - Thêm `comtypes.CoInitialize()` và `comtypes.CoUninitialize()` vào
-#   hàm `run_debug_session` để khởi tạo và giải phóng COM library một cách
-#   chính xác cho luồng tìm kiếm phụ.
-# - Lỗi này xảy ra do các hàm UIA cấp thấp yêu cầu luồng gọi chúng
-#   phải được khởi tạo trong môi trường COM phù hợp.
-# --- VERSION 3.6 (Standalone Enhancement) ---
-# - Thêm khả năng nhận window_spec và element_spec từ command-line arguments
-#   khi chạy độc lập, giúp việc tích hợp và kiểm thử dễ dàng hơn.
+# A standalone tool for debugging and testing UI selectors.
+# --- VERSION 4.1 (Performance Fix for Window Search):
+# - Sửa lỗi hiệu suất khiến việc tìm kiếm cửa sổ đã mở sẵn bị chậm.
+# - DebuggerWorker.run_debug_session giờ đây sử dụng timeout=1 và retry_interval=0.1
+#   cho việc tìm kiếm cửa sổ, giúp tìm thấy cửa sổ đã chạy rất nhanh mà vẫn có
+#   một chút khả năng chịu lỗi.
+# - Logic này chỉ áp dụng riêng cho công cụ debugger, không ảnh hưởng đến
+#   cơ chế mặc định của UIController.
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, font, messagebox
@@ -19,12 +16,14 @@ import logging
 import sys
 import time
 import argparse
+import inspect
 
 # --- Required Libraries ---
 try:
     from pywinauto import Desktop
     import comtypes
     from comtypes.gen import UIAutomationClient as UIA
+    from pywinauto.controls.uiawrapper import UIAWrapper
 except ImportError as e:
     print(f"Error importing libraries: {e}")
     sys.exit(1)
@@ -32,85 +31,99 @@ except ImportError as e:
 # --- Shared Logic Import ---
 try:
     import core_logic
+    import core_controller
 except ImportError:
-    print("CRITICAL ERROR: 'core_logic.py' must be in the same directory.")
+    print("CRITICAL ERROR: 'core_logic.py' and 'core_controller.py' must be in the same directory.")
     sys.exit(1)
 
 # ======================================================================
 #                       DEBUGGER LOGIC CLASS
 # ======================================================================
-class SelectorDebugger:
-    def __init__(self, log_callback):
+class DebuggerWorker:
+    """
+    Xử lý các tác vụ tìm kiếm và gỡ lỗi trong một luồng nền.
+    """
+    def __init__(self, log_callback, ui_controller_instance):
         self.log = log_callback
-        self.desktop = Desktop(backend='uia')
-        try:
-            self.uia = comtypes.client.CreateObject(UIA.CUIAutomation)
-            self.tree_walker = self.uia.ControlViewWalker
-        except (OSError, comtypes.COMError) as e:
-            self.log('ERROR', f"Fatal error initializing COM: {e}")
-            raise
-        self.finder = core_logic.ElementFinder(
-            uia_instance=self.uia, tree_walker=self.tree_walker, log_callback=self.log
-        )
+        self.ui_controller = ui_controller_instance
 
-    def run_debug_session(self, window_spec, element_spec, search_mode, on_complete_callback):
+    def run_debug_session(self, window_spec, element_spec, on_complete_callback):
+        """
+        Thực hiện một phiên gỡ lỗi.
+
+        Args:
+            window_spec (dict): Bộ lọc để tìm cửa sổ.
+            element_spec (dict): Bộ lọc để tìm element.
+            on_complete_callback (function): Hàm callback để xử lý kết quả.
+        """
         # Khởi tạo COM cho luồng này
         comtypes.CoInitialize()
         result_bundle = {"results": [], "level": "element", "window_context": []}
         try:
             session_start_time = time.perf_counter()
-            self.log('HEADER', f"--- STARTING DEBUG SESSION (Mode: {search_mode}) ---")
+            self.log('HEADER', f"--- BẮT ĐẦU PHIÊN GỠ LỖI ---")
             
-            self.log('INFO', "--- Step 1: Searching for WINDOW ---")
-            all_windows = self.desktop.windows()
+            self.log('INFO', "--- Bước 1: Tìm kiếm CỬA SỔ ---")
+            
+            # Lấy tất cả các cửa sổ để có ngữ cảnh cho việc tạo spec tối ưu sau này
+            all_windows = self.ui_controller.desktop.windows()
             result_bundle["window_context"] = all_windows
             
-            windows = self.finder.find(self.desktop, window_spec, search_mode='standard')
+            # Sử dụng UIController để tìm cửa sổ với thời gian chờ ngắn
+            windows = self.ui_controller.find_element(
+                window_spec=window_spec,
+                timeout=1,
+                retry_interval=0.1
+            )
             
-            if len(windows) == 1:
-                target_window = windows[0]
-                self.log('SUCCESS', f"Found 1 unique window: '{target_window.window_text()}'")
+            if windows:
+                # find_element trả về một đối tượng, không phải list
+                target_window = windows
+                self.log('SUCCESS', f"Tìm thấy 1 cửa sổ duy nhất: '{target_window.window_text()}'")
+                
                 if element_spec:
-                    self.log('INFO', f"--- Step 2: Searching for ELEMENT inside window (Mode: {search_mode}) ---")
-                    elements = self.finder.find(target_window, element_spec, search_mode=search_mode)
+                    self.log('INFO', f"--- Bước 2: Tìm kiếm ELEMENT bên trong cửa sổ ---")
+                    # Sử dụng UIController để tìm tất cả các element phù hợp
+                    elements = self.ui_controller.finder.find(target_window, element_spec)
                     result_bundle["results"] = elements
                     result_bundle["level"] = "element"
                 else:
                     result_bundle["results"] = [target_window]
                     result_bundle["level"] = "window"
-            elif len(windows) > 1:
-                self.log('ERROR', f"Found {len(windows)} ambiguous windows. Please refine window_spec.")
-                result_bundle["results"] = windows
-                result_bundle["level"] = "window"
             else:
-                self.log('ERROR', "No window found matching the specified criteria.")
+                self.log('ERROR', "Không tìm thấy cửa sổ nào phù hợp với tiêu chí.")
+                result_bundle["results"] = []
+                result_bundle["level"] = "window"
         
             total_duration = time.perf_counter() - session_start_time
             result_bundle['total_duration'] = total_duration
 
         except Exception as e:
-            self.log('ERROR', f"An unexpected error occurred: {e}")
+            self.log('ERROR', f"Đã xảy ra lỗi không mong muốn: {e}")
             logging.exception("Full traceback in console:")
         
         finally:
-            self.log('HEADER', "--- DEBUG SESSION FINISHED ---")
+            self.log('HEADER', "--- KẾT THÚC PHIÊN GỠ LỖI ---")
             on_complete_callback(result_bundle)
             # Giải phóng COM cho luồng này
             comtypes.CoUninitialize()
-            
-    def get_element_details(self, pwa_element):
-        self.log('DEBUG', "--- Getting full properties for selected item ---")
-        return core_logic.get_all_properties(pwa_element, self.uia, self.tree_walker)
 
 # ======================================================================
 #                       GUI CLASS (Embeddable Frame)
 # ======================================================================
 class DebuggerTab(ttk.Frame):
+    """
+    Tab gỡ lỗi selector trong Automation Suite.
+    """
     def __init__(self, parent, suite_app=None, status_label_widget=None):
         super().__init__(parent)
         self.pack(fill="both", expand=True)
         self.suite_app = suite_app
         self.status_label = status_label_widget or getattr(suite_app, 'status_label', None)
+        
+        # Khởi tạo UIController một lần cho tab này
+        self.controller = core_controller.UIController(log_level='debug')
+        self.debugger_worker = DebuggerWorker(self.log_message, self.controller)
 
         style = ttk.Style(self)
         style.theme_use('clam')
@@ -126,11 +139,14 @@ class DebuggerTab(ttk.Frame):
         self.selected_item = None
         self.selected_item_type = 'element'
         self.last_window_context = []
+        self.last_element_context = []
         
         self.create_widgets()
-        self.debugger = SelectorDebugger(self.log_message)
 
     def create_widgets(self):
+        """
+        Tạo và bố cục các widget trên giao diện.
+        """
         main_paned_window = ttk.PanedWindow(self, orient='vertical')
         main_paned_window.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -149,6 +165,9 @@ class DebuggerTab(ttk.Frame):
         main_paned_window.add(log_frame, weight=1)
 
     def create_input_frame(self, parent):
+        """
+        Tạo khung nhập liệu cho các selector.
+        """
         frame = ttk.Frame(parent)
         frame.columnconfigure(1, weight=1)
         
@@ -163,14 +182,7 @@ class DebuggerTab(ttk.Frame):
 
         control_frame = ttk.Frame(frame)
         control_frame.grid(row=2, column=1, sticky='ew')
-
-        ttk.Label(control_frame, text="Search Mode:").pack(side="left", padx=(0, 5))
         
-        search_modes = ['standard', 'hybrid', 'cached', 'native_only']
-        self.search_mode_var = tk.StringVar(value=search_modes[1])
-        self.search_mode_combo = ttk.Combobox(control_frame, textvariable=self.search_mode_var, values=search_modes, state='readonly', width=15)
-        self.search_mode_combo.pack(side="left", padx=5)
-
         button_frame = ttk.Frame(control_frame)
         button_frame.pack(side="left", padx=20)
         
@@ -186,6 +198,9 @@ class DebuggerTab(ttk.Frame):
         return frame
 
     def create_results_frame(self, parent):
+        """
+        Tạo khung hiển thị kết quả tìm kiếm.
+        """
         self.results_labelframe = ttk.LabelFrame(parent, text="Found Results")
         self.results_labelframe.columnconfigure(0, weight=1); self.results_labelframe.rowconfigure(0, weight=1)
         self.results_tree = ttk.Treeview(self.results_labelframe, show="headings")
@@ -200,6 +215,9 @@ class DebuggerTab(ttk.Frame):
         return self.results_labelframe
 
     def create_log_frame(self, parent):
+        """
+        Tạo khung hiển thị log chi tiết.
+        """
         frame = ttk.LabelFrame(parent, text="Detailed Log")
         frame.rowconfigure(0, weight=1); frame.columnconfigure(0, weight=1)
         self.log_area = scrolledtext.ScrolledText(frame, wrap="word", font=("Consolas", 10), state="disabled", bg="#2B2B2B")
@@ -209,10 +227,16 @@ class DebuggerTab(ttk.Frame):
         return frame
 
     def update_status(self, text):
+        """
+        Cập nhật thanh trạng thái.
+        """
         if self.status_label:
             self.status_label.config(text=text)
 
     def log_message(self, level, message):
+        """
+        Ghi log vào khu vực văn bản và thanh trạng thái.
+        """
         self.update_status(f"Debugger: {message if isinstance(message, str) else 'Processing...'}")
         self.log_area.config(state="normal")
         if isinstance(message, list):
@@ -225,6 +249,9 @@ class DebuggerTab(ttk.Frame):
         self.log_area.see(tk.END)
 
     def clear_log(self):
+        """
+        Xóa tất cả log và kết quả hiển thị.
+        """
         self.log_area.config(state="normal")
         self.log_area.delete("1.0", tk.END)
         self.log_area.config(state="disabled")
@@ -235,6 +262,9 @@ class DebuggerTab(ttk.Frame):
         self.update_status("Debugger cleared. Ready for new test.")
 
     def _extract_and_parse_spec(self, spec_string):
+        """
+        Trích xuất và phân tích cú pháp chuỗi spec từ Text widget.
+        """
         spec_string = spec_string.strip()
         if not spec_string: return {}
         start_brace = spec_string.find('{')
@@ -247,26 +277,34 @@ class DebuggerTab(ttk.Frame):
         except (ValueError, SyntaxError) as e: raise ValueError(f"Could not parse spec. Error: {e}")
 
     def run_test(self):
+        """
+        Bắt đầu phiên gỡ lỗi trong một luồng nền.
+        """
         self.clear_log()
         self.run_button.config(state="disabled")
         self.update_status("Debugger: Running test...")
         try:
             win_spec = self._extract_and_parse_spec(self.window_spec_text.get("1.0", "end-1c"))
             elem_spec = self._extract_and_parse_spec(self.element_spec_text.get("1.0", "end-1c"))
-            search_mode = self.search_mode_var.get()
         except ValueError as e:
             self.log_message('ERROR', f"Syntax error in spec: {e}")
             self.run_button.config(state="normal")
             self.update_status("Debugger: Error in spec.")
             return
         
-        self.test_thread = threading.Thread(target=self.debugger.run_debug_session, args=(win_spec, elem_spec, search_mode, self.on_test_complete), daemon=True)
+        self.test_thread = threading.Thread(target=self.debugger_worker.run_debug_session, args=(win_spec, elem_spec, self.on_test_complete), daemon=True)
         self.test_thread.start()
 
     def on_test_complete(self, result_bundle):
+        """
+        Xử lý kết quả sau khi phiên gỡ lỗi hoàn tất.
+        """
         self.after(0, self._update_gui_on_test_complete, result_bundle)
         
     def _update_gui_on_test_complete(self, result_bundle):
+        """
+        Cập nhật giao diện với kết quả từ phiên gỡ lỗi.
+        """
         self.run_button.config(state="normal")
         self.found_items_map.clear()
         results = result_bundle.get("results", [])
@@ -304,12 +342,15 @@ class DebuggerTab(ttk.Frame):
 
         total_duration = result_bundle.get('total_duration')
         if total_duration is not None:
-            self.log_message('HEADER', f"--- TOTAL DURATION: {total_duration:.4f} seconds ---")
+            self.log_message('HEADER', f"--- TỔNG THỜI GIAN: {total_duration:.4f} giây ---")
 
         if len(results) == 1:
             self.after(100, self._auto_select_first_item)
 
     def _auto_select_first_item(self):
+        """
+        Tự động chọn mục đầu tiên nếu chỉ có một kết quả.
+        """
         if not self.results_tree.get_children():
             return
         first_item_id = self.results_tree.get_children()[0]
@@ -318,6 +359,9 @@ class DebuggerTab(ttk.Frame):
         self.on_result_selected(None)
 
     def configure_treeview_columns(self, column_names):
+        """
+        Cấu hình các cột của Treeview.
+        """
         self.results_tree.config(columns=column_names)
         for name in column_names:
             self.results_tree.heading(name, text=name)
@@ -326,6 +370,9 @@ class DebuggerTab(ttk.Frame):
             self.results_tree.column(column_names[0], width=400)
 
     def on_result_selected(self, event):
+        """
+        Xử lý sự kiện khi một mục trong Treeview được chọn.
+        """
         selected_items = self.results_tree.selection()
         if not selected_items: return
         selected_id = selected_items[0]
@@ -338,6 +385,9 @@ class DebuggerTab(ttk.Frame):
             except Exception: self.update_status("Debugger: Selected an item.")
 
     def highlight_item(self, item):
+        """
+        Vẽ một hình chữ nhật highlight lên element đã chọn.
+        """
         if self.highlighter: self.highlighter.destroy()
         try: rect = item.rectangle()
         except Exception as e:
@@ -353,6 +403,9 @@ class DebuggerTab(ttk.Frame):
         self.highlighter.after(3000, self.highlighter.destroy)
 
     def show_detail_window(self):
+        """
+        Hiển thị cửa sổ chi tiết với các spec đầy đủ và tối ưu.
+        """
         if not self.selected_item:
             messagebox.showwarning("No Item Selected", "Please select an item from the list.")
             return
@@ -362,24 +415,24 @@ class DebuggerTab(ttk.Frame):
         detail_win.transient(self)
         detail_win.grab_set()
         
-        if self.selected_item_type == 'window':
-            element_pwa = window_pwa = self.selected_item
-        else:
-            element_pwa = self.selected_item
-            window_pwa = element_pwa.top_level_parent()
+        # Lấy thông tin đầy đủ của element đã chọn
+        element_pwa = self.selected_item
+        window_pwa = core_logic.get_top_level_window(element_pwa)
         
-        window_info = self.debugger.get_element_details(window_pwa)
-        element_info = self.debugger.get_element_details(element_pwa)
+        # Tạo spec tối ưu và đầy đủ
+        window_info = core_logic.get_all_properties(window_pwa, self.controller.uia, self.controller.tree_walker)
+        element_info = core_logic.get_all_properties(element_pwa, self.controller.uia, self.controller.tree_walker)
         cleaned_element_info = core_logic.clean_element_spec(window_info, element_info)
         
-        all_windows_on_desktop_info = [core_logic.get_all_properties(w) for w in self.last_window_context]
-        all_elements_in_window_info = [core_logic.get_all_properties(e) for e in window_pwa.descendants()]
+        # Lấy ngữ cảnh tìm kiếm để tạo spec tối ưu
+        all_windows_on_desktop_info = [core_logic.get_all_properties(w, self.controller.uia, self.controller.tree_walker) for w in self.last_window_context]
+        try:
+            all_elements_in_window_info = [core_logic.get_all_properties(e, self.controller.uia, self.controller.tree_walker) for e in window_pwa.descendants()]
+        except Exception as e:
+            self.log_message("WARNING", f"Could not get all elements in window for optimal spec: {e}. Using a limited context.")
+            all_elements_in_window_info = []
 
-        for w_info in all_windows_on_desktop_info: w_info['sys_unique_id'] = id(w_info.get('pwa_object').element_info.element)
-        for e_info in all_elements_in_window_info: e_info['sys_unique_id'] = id(e_info.get('pwa_object').element_info.element)
-        window_info['sys_unique_id'] = id(window_pwa.element_info.element)
-        element_info['sys_unique_id'] = id(element_pwa.element_info.element)
-        
+        # Tạo spec tối ưu dựa trên ngữ cảnh
         optimal_window_spec = core_logic.create_optimal_window_spec(window_info, all_windows_on_desktop_info)
         optimal_element_spec = core_logic.create_optimal_element_spec(element_info, all_elements_in_window_info)
 
@@ -398,6 +451,7 @@ class DebuggerTab(ttk.Frame):
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(0, weight=1); main_frame.rowconfigure(1, weight=1); main_frame.rowconfigure(2, weight=1)
         
+        # --- Full Spec Frame ---
         full_win_spec_str = core_logic.format_spec_to_string(window_info, "window_spec")
         full_elem_spec_str = core_logic.format_spec_to_string(cleaned_element_info, "element_spec")
         full_spec_frame = ttk.LabelFrame(main_frame, text="Full Specification", padding=(10, 5))
@@ -410,10 +464,11 @@ class DebuggerTab(ttk.Frame):
         full_btn_frame.place(relx=1.0, rely=0, x=-5, y=-11, anchor='ne')
         copy_full_btn = ttk.Button(full_btn_frame, text="📋 Copy All", style="Copy.TButton", command=lambda: copy_to_clipboard(full_text.get("1.0", "end-1c"), copy_full_btn))
         copy_full_btn.pack(side='left', padx=2)
-        if self.suite_app:
+        if self.suite_app and hasattr(self.suite_app, 'send_specs_to_debugger'):
             send_full_btn = ttk.Button(full_btn_frame, text="🚀 Send to Debugger", style="Copy.TButton", command=lambda: send_specs(window_info, cleaned_element_info))
             send_full_btn.pack(side='left', padx=2)
             
+        # --- Optimal Spec Frame ---
         optimal_win_str = core_logic.format_spec_to_string(optimal_window_spec, 'window_spec')
         optimal_elem_str = core_logic.format_spec_to_string(optimal_element_spec, 'element_spec')
         combined_optimal_str = f"{optimal_win_str}\n\n{optimal_elem_str}"
@@ -427,11 +482,14 @@ class DebuggerTab(ttk.Frame):
         optimal_btn_frame.place(relx=1.0, rely=0, x=-5, y=-11, anchor='ne')
         copy_optimal_btn = ttk.Button(optimal_btn_frame, text="📋 Copy All", style="Copy.TButton", command=lambda: copy_to_clipboard(combined_optimal_str, copy_optimal_btn))
         copy_optimal_btn.pack(side='left', padx=2)
-        if self.suite_app:
+        if self.suite_app and hasattr(self.suite_app, 'send_specs_to_debugger'):
             send_optimal_btn = ttk.Button(optimal_btn_frame, text="🚀 Send to Debugger", style="Copy.TButton", command=lambda: send_specs(optimal_window_spec, optimal_element_spec))
             send_optimal_btn.pack(side='left', padx=2)
 
     def receive_specs(self, window_spec, element_spec):
+        """
+        Nhận spec từ một công cụ khác và hiển thị chúng.
+        """
         self.clear_log()
         win_spec_str = core_logic.format_spec_to_string(window_spec, "window_spec")
         elem_spec_str = core_logic.format_spec_to_string(element_spec, "element_spec")
@@ -452,7 +510,6 @@ class DebuggerTab(ttk.Frame):
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
     
-    # --- THÊM LOGIC PARSE ARGUMENT ---
     parser = argparse.ArgumentParser(description="Standalone Selector Debugger Tool.")
     parser.add_argument('--window-spec', type=str, help="A Python dictionary string representing the window specification.")
     parser.add_argument('--element-spec', type=str, help="A Python dictionary string representing the element specification.")
@@ -470,7 +527,6 @@ if __name__ == '__main__':
 
     app_frame = DebuggerTab(root, status_label_widget=status_label)
     
-    # --- XỬ LÝ ARGUMENTS ---
     if args.window_spec or args.element_spec:
         try:
             win_spec = ast.literal_eval(args.window_spec) if args.window_spec else {}
