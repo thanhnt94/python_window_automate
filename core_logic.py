@@ -1,12 +1,9 @@
 # core_logic.py
-# --- VERSION 16.3 (Prioritized Filtering):
-# - Optimized the _apply_filters method to check "fast" properties first.
-# - A predefined FILTER_PRIORITY list now sorts the properties in a spec
-#   before the filtering loop begins.
-# - This ensures that cheap checks (like `pwa_title` or `state_is_enabled`) are
-#   performed before expensive ones (like `rel_level` or UIA patterns).
-# - This "fail faster" approach improves average performance by avoiding costly
-#   calculations on elements that would be discarded by simpler checks anyway.
+# --- VERSION 16.4 (Timeout Propagation):
+# - Thêm tham số 'timeout' vào ElementFinder.find và _apply_filters để cho phép
+#   việc chủ động ngắt tìm kiếm nếu nó vượt quá thời gian cho phép.
+# - Điều này sửa lỗi nghiêm trọng khiến các tác vụ tìm kiếm bị chặn và
+#   vượt quá thời gian chờ đã được thiết lập.
 
 import logging
 import re
@@ -113,6 +110,8 @@ OPERATOR_DEFINITIONS: List[Dict[str, str]] = [
     {'category': 'String', 'name': 'in', 'example': "'proc_name': ('in', ['explorer.exe', 'notepad.exe'])", 'desc': "Checks if the value is in a list of strings."},
     {'category': 'String', 'name': 'regex', 'example': "'pwa_title': ('regex', r'File.*')", 'desc': "Matches using a regular expression."},
     {'category': 'String', 'name': 'not_equals', 'example': "'pwa_title': ('not_equals', 'Calculator')", 'desc': "Value is not exactly equal."},
+    {'category': 'String', 'name': 'not_iequals', 'example': "'pwa_class_name': ('not_iequals', 'Chrome')", 'desc': "Value does not contain the substring (case-insensitive)."},
+    {'category': 'String', 'name': 'not_contains', 'example': "'pwa_class_name': ('not_contains', 'Chrome')", 'desc': "Value does not contain the substring (case-sensitive)."},
     {'category': 'String', 'name': 'not_icontains', 'example': "'pwa_class_name': ('not_icontains', 'Chrome')", 'desc': "Value does not contain the substring (case-insensitive)."},
     {'category': 'Numeric', 'name': '>', 'example': "'rel_child_count': ('>', 5)", 'desc': "Greater than."},
     {'category': 'Numeric', 'name': '>=', 'example': "'rel_child_count': ('>=', 5)", 'desc': "Greater than or equal to."},
@@ -168,6 +167,9 @@ PROC_INFO_CACHE: Dict[int, Dict[str, Any]] = {}
 
 # --- Unchanged Public Utility Functions and Classes ---
 def format_spec_to_string(spec_dict: Dict[str, Any], spec_name: str = "spec") -> str:
+    """
+    Chuyển một từ điển spec thành chuỗi được định dạng đẹp mắt để dễ đọc.
+    """
     if not spec_dict: return f"{spec_name} = {{}}"
     dict_to_format = {k: v for k, v in spec_dict.items() if not k.startswith('sys_') and k != 'pwa_object' and (v or v is False or v == 0)}
     if not dict_to_format: return f"{spec_name} = {{}}"
@@ -176,6 +178,9 @@ def format_spec_to_string(spec_dict: Dict[str, Any], spec_name: str = "spec") ->
     return f"{spec_name} = {{\n{content}\n}}"
 
 def clean_element_spec(window_info: Dict[str, Any], element_info: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Loại bỏ các thuộc tính trùng lặp từ element_spec mà đã có sẵn trong window_spec.
+    """
     if not window_info or not element_info: return element_info
     cleaned_spec = element_info.copy()
     for key, value in list(element_info.items()):
@@ -184,6 +189,9 @@ def clean_element_spec(window_info: Dict[str, Any], element_info: Dict[str, Any]
     return cleaned_spec
 
 def create_optimal_element_spec(selected_element: Dict[str, Any], all_elements_in_context: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Tạo một bộ lọc tối ưu nhất (spec) cho một element dựa trên ngữ cảnh.
+    """
     logger.info("--- Building Optimal Element Spec ---")
     if not selected_element: return {}
     def get_matches(spec: Dict[str, Any], elements_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -214,6 +222,9 @@ def create_optimal_element_spec(selected_element: Dict[str, Any], all_elements_i
     return final_spec
 
 def create_optimal_window_spec(selected_window: Dict[str, Any], all_windows_on_desktop: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Tạo một bộ lọc tối ưu nhất (spec) cho một cửa sổ dựa trên ngữ cảnh.
+    """
     logger.info("--- Building Optimal Window Spec ---")
     if not selected_window: return {}
     base_spec = {}
@@ -232,6 +243,9 @@ def create_optimal_window_spec(selected_window: Dict[str, Any], all_windows_on_d
     return base_spec
 
 def get_process_info(pid: int) -> Dict[str, Any]:
+    """
+    Lấy thông tin của một process từ PID.
+    """
     if pid in PROC_INFO_CACHE: return PROC_INFO_CACHE[pid]
     if pid > 0:
         try:
@@ -243,6 +257,9 @@ def get_process_info(pid: int) -> Dict[str, Any]:
     return {}
 
 def get_property_value(pwa_element: UIAWrapper, key: str, uia_instance=None, tree_walker=None) -> Any:
+    """
+    Lấy giá trị của một thuộc tính từ một element.
+    """
     prop = key.lower()
     com_element = getattr(pwa_element.element_info, 'element', getattr(pwa_element, 'element', pwa_element))
     try:
@@ -321,6 +338,9 @@ def get_property_value(pwa_element: UIAWrapper, key: str, uia_instance=None, tre
         return None
 
 def get_all_properties(pwa_element: UIAWrapper, uia_instance=None, tree_walker=None) -> Dict[str, Any]:
+    """
+    Lấy tất cả các thuộc tính có sẵn của một element.
+    """
     all_props = {}
     for key in SUPPORTED_FILTER_KEYS:
         value = get_property_value(pwa_element, key, uia_instance, tree_walker)
@@ -335,10 +355,17 @@ def get_all_properties(pwa_element: UIAWrapper, uia_instance=None, tree_walker=N
     return all_props
 
 def get_top_level_window(pwa_element: UIAWrapper) -> Optional[UIAWrapper]:
+    """
+    Tìm cửa sổ cấp cao nhất (top-level) của một element.
+    """
     try: return pwa_element.top_level_parent()
     except (AttributeError, RuntimeError): return None
 
 class ElementFinder:
+    """
+    Thực hiện tìm kiếm các element UI bằng cách kết hợp các phương thức gốc
+    của pywinauto và các bộ lọc tùy chỉnh.
+    """
     PYWINAUTO_NATIVE_MAP = {
         'pwa_title': 'title',
         'pwa_class_name': 'class_name',
@@ -357,7 +384,20 @@ class ElementFinder:
         self.tree_walker = tree_walker
         self.anchor_cache: Dict[str, UIAWrapper] = {}
 
-    def find(self, search_root: UIAWrapper, spec: Dict[str, Any], max_depth: Optional[int] = None, search_direction: Optional[str] = None) -> List[UIAWrapper]:
+    def find(self, search_root: UIAWrapper, spec: Dict[str, Any], timeout: Optional[float] = None, max_depth: Optional[int] = None, search_direction: Optional[str] = None) -> List[UIAWrapper]:
+        """
+        Tìm kiếm các element dựa trên một bộ lọc (spec).
+
+        Args:
+            search_root (UIAWrapper): Element gốc để bắt đầu tìm kiếm.
+            spec (Dict[str, Any]): Bộ lọc tìm kiếm.
+            timeout (Optional[float]): Thời gian chờ tối đa cho tác vụ tìm kiếm này.
+            max_depth (Optional[int]): Độ sâu tối đa để tìm kiếm.
+            search_direction (Optional[str]): Hướng tìm kiếm ('forward' hoặc 'backward').
+
+        Returns:
+            List[UIAWrapper]: Danh sách các element phù hợp.
+        """
         start_time = time.perf_counter()
         
         if 'search_max_depth' in spec:
@@ -370,13 +410,13 @@ class ElementFinder:
 
         original_spec_for_logging = spec.copy()
         
-        self.log('DEBUG', f"Starting find with spec: {original_spec_for_logging}, depth: {max_depth}, direction: {search_direction}")
+        self.log('DEBUG', f"Starting find with spec: {original_spec_for_logging}, depth: {max_depth}, direction: {search_direction}, timeout: {timeout}")
         self.anchor_cache.clear()
 
         ancestor_spec = spec.pop('ancestor', None)
         if ancestor_spec:
             self.log('INFO', f"Ancestor spec found. Finding ancestor first: {ancestor_spec}")
-            ancestor_candidates = self.find(search_root, ancestor_spec, max_depth=max_depth)
+            ancestor_candidates = self.find(search_root, ancestor_spec, timeout=timeout, max_depth=max_depth)
             if not ancestor_candidates:
                 self.log('WARNING', "Ancestor not found. Search will fail.")
                 return []
@@ -423,7 +463,7 @@ class ElementFinder:
         
         if filter_spec:
             self.log('DEBUG', f"Applying post-filters: {filter_spec}")
-            filtered_candidates = self._apply_filters(initial_candidates, filter_spec, initial_candidates)
+            filtered_candidates = self._apply_filters(initial_candidates, filter_spec, initial_candidates, start_time, timeout)
         else:
             filtered_candidates = initial_candidates
 
@@ -443,7 +483,10 @@ class ElementFinder:
         self.log('DEBUG', f"Find finished. Found {len(final_candidates)} candidates.")
         return final_candidates
 
-    def _apply_filters(self, elements: List[UIAWrapper], spec: Dict[str, Any], full_context: List[UIAWrapper]) -> List[UIAWrapper]:
+    def _apply_filters(self, elements: List[UIAWrapper], spec: Dict[str, Any], full_context: List[UIAWrapper], start_time: float, timeout: Optional[float]) -> List[UIAWrapper]:
+        """
+        Áp dụng các bộ lọc tùy chỉnh cho một danh sách các element.
+        """
         if not spec: return elements
         
         filtered_elements = []
@@ -460,6 +503,11 @@ class ElementFinder:
         sorted_property_spec = sorted(property_spec.items(), key=lambda item: get_priority(item[0]))
         
         for elem in elements:
+            # Ngắt nếu hết thời gian chờ
+            if timeout and time.perf_counter() - start_time > timeout:
+                self.log('ERROR', f"TIMEOUT: Filtering aborted. Exceeded {timeout}s.")
+                return filtered_elements
+
             prop_cache = {}
             is_match = True
             
@@ -483,6 +531,9 @@ class ElementFinder:
         return filtered_elements
 
     def _check_condition(self, element: UIAWrapper, key: str, criteria: Any, prop_cache: Dict[str, Any]) -> bool:
+        """
+        Kiểm tra một điều kiện lọc duy nhất.
+        """
         if key in prop_cache: actual_value = prop_cache[key]
         else: actual_value = get_property_value(element, key, self.uia, self.tree_walker); prop_cache[key] = actual_value
         is_operator_syntax = (isinstance(criteria, tuple) and len(criteria) == 2 and str(criteria[0]).lower() in VALID_OPERATORS)
@@ -514,6 +565,9 @@ class ElementFinder:
         return False
 
     def _check_advanced_condition(self, element: UIAWrapper, key: str, criteria: Any, full_context: List[UIAWrapper]) -> bool:
+        """
+        Kiểm tra các điều kiện lọc nâng cao (vị trí, quan hệ).
+        """
         if key == 'within_rect':
             elem_rect_val = get_property_value(element, 'geo_bounding_rect_tuple')
             if not elem_rect_val: return False
@@ -540,6 +594,9 @@ class ElementFinder:
         return False
 
     def _apply_selectors(self, candidates: List[UIAWrapper], selectors: Dict[str, Any]) -> List[UIAWrapper]:
+        """
+        Áp dụng các bộ chọn (selectors) để thu hẹp kết quả.
+        """
         if not candidates: return []
         if 'sort_by_scan_order' in selectors:
             index = selectors['sort_by_scan_order']
@@ -575,6 +632,9 @@ class ElementFinder:
             return []
 
     def _get_sort_key_function(self, key: str) -> Optional[Callable[[UIAWrapper], Any]]:
+        """
+        Trả về một hàm để sắp xếp element dựa trên key.
+        """
         if key == 'sort_by_creation_time': return lambda e: get_property_value(e, 'proc_create_time') or datetime.min.strftime('%Y-%m-%d %H:%M:%S')
         if key == 'sort_by_title_length': return lambda e: len(get_property_value(e, 'pwa_title') or '')
         if key == 'sort_by_child_count': return lambda e: get_property_value(e, 'rel_child_count') or 0
