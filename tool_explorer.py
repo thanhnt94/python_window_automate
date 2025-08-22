@@ -1,14 +1,11 @@
 # tool_explorer.py
 # A standalone and embeddable tool for full window element scanning.
-# --- VERSION 7.2 (Centralized Logic): Corrected a critical bug where 'sys_unique_id' was not being
-# added to window properties. Now calls the centralized 'create_optimal_spec' functions
-# from core_logic for consistent behavior.
-# --- VERSION 7.3 (Performance Logging) ---
-# - Tích hợp performance logger để đo thời gian quét toàn bộ cửa sổ và quét sâu.
-# --- VERSION 7.4 (Debugger Integration) ---
-# - Thêm nút "Send to Debugger" vào cửa sổ chi tiết element.
-# - Nút này chỉ hiển thị khi chạy Explorer bên trong Automation Suite.
-# - Cho phép gửi trực tiếp full spec hoặc optimal spec sang tab Debugger.
+# --- VERSION 7.5 (Improved Window Filtering):
+# - Sửa lỗi không hiển thị một số cửa sổ (ví dụ: TeamCenter RAC) do điều kiện
+#   lọc quá chặt.
+# - Điều chỉnh hàm `get_all_windows` để chỉ loại bỏ các cửa sổ không hiển thị
+#   hoặc không hợp lệ, giữ lại các cửa sổ có thể không có tiêu đề nhưng vẫn
+#   tương tác được.
 
 import logging
 import re
@@ -67,7 +64,10 @@ class FullScanner:
         all_windows_data = []
         for win in windows:
             try:
-                if win.is_visible() and win.window_text():
+                # --- SỬA LỖI: Điều chỉnh điều kiện lọc ---
+                # Chỉ lọc các cửa sổ không hiển thị. Giữ lại những cửa sổ không có tiêu đề
+                # vì chúng có thể vẫn là cửa sổ chính của một ứng dụng (ví dụ: một số công cụ CAD).
+                if win.is_visible():
                     info = core_logic.get_all_properties(win, self.uia, self.tree_walker)
                     info['pwa_object'] = win # Keep the object for later use
                     info['sys_unique_id'] = id(win.element_info.element)
@@ -240,22 +240,31 @@ class ExplorerTab(ttk.Frame):
             send_optimal_btn.pack(side='left', padx=2)
 
     def create_widgets(self,):
-        top_frame = ttk.Frame(self, padding=10)
-        top_frame.pack(side='top', fill='x')
-        self.scan_windows_btn = ttk.Button(top_frame, text="Scan All Windows", command=self.start_scan_windows)
-        self.scan_windows_btn.pack(side='left', padx=(0, 10))
-        self.scan_elements_btn = ttk.Button(top_frame, text="Scan Window's Elements", state="disabled", command=self.start_scan_elements)
-        self.scan_elements_btn.pack(side='left', padx=10)
-        self.detail_btn = ttk.Button(top_frame, text="View Element Details", state="disabled", command=self.show_detail_window)
-        self.detail_btn.pack(side='left', padx=10)
-        self.export_btn = ttk.Button(top_frame, text="Export to Excel...", state="disabled", command=self.export_to_excel)
-        self.export_btn.pack(side='left', padx=10)
         main_paned_window = ttk.PanedWindow(self, orient='vertical')
-        main_paned_window.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        windows_frame = self.create_windows_list_frame(main_paned_window)
-        main_paned_window.add(windows_frame, weight=1)
+        main_paned_window.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        top_frame = ttk.Frame(main_paned_window)
+        main_paned_window.add(top_frame, weight=2)
+        top_frame.columnconfigure(0, weight=1)
+        top_frame.rowconfigure(1, weight=1)
+
+        control_frame = ttk.Frame(top_frame, padding=10)
+        control_frame.grid(row=0, column=0, sticky='ew')
+        
+        self.scan_windows_btn = ttk.Button(control_frame, text="Scan All Windows", command=self.start_scan_windows)
+        self.scan_windows_btn.pack(side='left', padx=(0, 10))
+        self.scan_elements_btn = ttk.Button(control_frame, text="Scan Window's Elements", state="disabled", command=self.start_scan_elements)
+        self.scan_elements_btn.pack(side='left', padx=10)
+        self.detail_btn = ttk.Button(control_frame, text="View Element Details", state="disabled", command=self.show_detail_window)
+        self.detail_btn.pack(side='left', padx=10)
+        self.export_btn = ttk.Button(control_frame, text="Export to Excel...", state="disabled", command=self.export_to_excel)
+        self.export_btn.pack(side='left', padx=10)
+
+        windows_frame = self.create_windows_list_frame(top_frame)
+        windows_frame.grid(row=1, column=0, sticky='nsew')
+        
         elements_frame = self.create_elements_list_frame(main_paned_window)
-        main_paned_window.add(elements_frame, weight=2)
+        main_paned_window.add(elements_frame, weight=3)
 
     def create_windows_list_frame(self, parent):
         frame = ttk.LabelFrame(parent, text="Running Windows List")
