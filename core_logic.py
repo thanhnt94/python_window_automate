@@ -1,12 +1,14 @@
 # core_logic.py
-# --- VERSION 16.4 (Timeout Propagation):
-# - Thêm tham số 'timeout' vào ElementFinder.find và _apply_filters để cho phép
-#   việc chủ động ngắt tìm kiếm nếu nó vượt quá thời gian cho phép.
-# - Điều này sửa lỗi nghiêm trọng khiến các tác vụ tìm kiếm bị chặn và
-#   vượt quá thời gian chờ đã được thiết lập.
+# --- VERSION 16.6 (Fix TypeError for retry_interval):
+# - Đã thêm tham số 'retry_interval' vào định nghĩa hàm ElementFinder.find.
+# - Khắc phục lỗi TypeError khi core_controller.py truyền tham số này xuống
+#   mà hàm find chưa chấp nhận.
+# - Đảm bảo tính nhất quán trong việc truyền và sử dụng tham số thời gian chờ
+#   giữa các module.
 
 import logging
 import re
+import sys
 import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Callable, Tuple, Set
@@ -23,9 +25,8 @@ try:
     from pywinauto.findwindows import ElementNotFoundError
     from pywinauto.controls.uiawrapper import UIAWrapper
 except ImportError as e:
-    print(f"Error importing libraries: {e}")
-    print("Suggestion: pip install psutil pywinauto comtypes")
-    exit()
+    print(f"Lỗi: Không thể import thư viện, vui lòng cài đặt: {e}")
+    sys.exit(1)
 
 # Initialize logger for this module
 logger = logging.getLogger(__name__)
@@ -384,7 +385,7 @@ class ElementFinder:
         self.tree_walker = tree_walker
         self.anchor_cache: Dict[str, UIAWrapper] = {}
 
-    def find(self, search_root: UIAWrapper, spec: Dict[str, Any], timeout: Optional[float] = None, max_depth: Optional[int] = None, search_direction: Optional[str] = None) -> List[UIAWrapper]:
+    def find(self, search_root: UIAWrapper, spec: Dict[str, Any], timeout: Optional[float] = None, max_depth: Optional[int] = None, search_direction: Optional[str] = None, retry_interval: Optional[float] = None) -> List[UIAWrapper]:
         """
         Tìm kiếm các element dựa trên một bộ lọc (spec).
 
@@ -392,8 +393,11 @@ class ElementFinder:
             search_root (UIAWrapper): Element gốc để bắt đầu tìm kiếm.
             spec (Dict[str, Any]): Bộ lọc tìm kiếm.
             timeout (Optional[float]): Thời gian chờ tối đa cho tác vụ tìm kiếm này.
+                                       Quá trình lọc sẽ bị hủy nếu vượt quá thời gian này.
             max_depth (Optional[int]): Độ sâu tối đa để tìm kiếm.
             search_direction (Optional[str]): Hướng tìm kiếm ('forward' hoặc 'backward').
+            retry_interval (Optional[float]): Khoảng thời gian chờ giữa các lần thử lại (hiện không được sử dụng trực tiếp trong find,
+                                              nhưng được chấp nhận để tương thích với các hàm gọi).
 
         Returns:
             List[UIAWrapper]: Danh sách các element phù hợp.
@@ -416,7 +420,8 @@ class ElementFinder:
         ancestor_spec = spec.pop('ancestor', None)
         if ancestor_spec:
             self.log('INFO', f"Ancestor spec found. Finding ancestor first: {ancestor_spec}")
-            ancestor_candidates = self.find(search_root, ancestor_spec, timeout=timeout, max_depth=max_depth)
+            # Truyền timeout và retry_interval xuống hàm find đệ quy
+            ancestor_candidates = self.find(search_root, ancestor_spec, timeout=timeout, max_depth=max_depth, retry_interval=retry_interval)
             if not ancestor_candidates:
                 self.log('WARNING', "Ancestor not found. Search will fail.")
                 return []
@@ -463,6 +468,7 @@ class ElementFinder:
         
         if filter_spec:
             self.log('DEBUG', f"Applying post-filters: {filter_spec}")
+            # TRUYỀN THAM SỐ timeout VÀO HÀM _apply_filters
             filtered_candidates = self._apply_filters(initial_candidates, filter_spec, initial_candidates, start_time, timeout)
         else:
             filtered_candidates = initial_candidates
@@ -485,7 +491,9 @@ class ElementFinder:
 
     def _apply_filters(self, elements: List[UIAWrapper], spec: Dict[str, Any], full_context: List[UIAWrapper], start_time: float, timeout: Optional[float]) -> List[UIAWrapper]:
         """
+        Mô tả:
         Áp dụng các bộ lọc tùy chỉnh cho một danh sách các element.
+        Quá trình lọc sẽ bị hủy nếu vượt quá thời gian 'timeout' được cấp.
         """
         if not spec: return elements
         
@@ -503,10 +511,10 @@ class ElementFinder:
         sorted_property_spec = sorted(property_spec.items(), key=lambda item: get_priority(item[0]))
         
         for elem in elements:
-            # Ngắt nếu hết thời gian chờ
-            if timeout and time.perf_counter() - start_time > timeout:
-                self.log('ERROR', f"TIMEOUT: Filtering aborted. Exceeded {timeout}s.")
-                return filtered_elements
+            # KIỂM TRA THỜI GIAN CHỜ: Ngắt nếu hết thời gian chờ được cấp cho toàn bộ quá trình tìm kiếm
+            if timeout is not None and time.perf_counter() - start_time > timeout:
+                self.log('ERROR', f"TIMEOUT: Filtering aborted. Exceeded {timeout}s. Returning partial results.")
+                return filtered_elements # Trả về các kết quả đã lọc được cho đến thời điểm đó
 
             prop_cache = {}
             is_match = True
